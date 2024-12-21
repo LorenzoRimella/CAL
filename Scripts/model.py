@@ -20,6 +20,8 @@ def simulation_step_0(pi, sample_size = 1, seed_sim = None):
 	the given seed
 	"""
 
+	# TODO use onehotcategorical instead
+
 	X = tfp.distributions.Categorical(probs = pi)
 
 	return tf.one_hot(X.sample(sample_size, seed = seed_sim), tf.shape(pi)[1])
@@ -304,6 +306,95 @@ class basic_SIS():
 					prob_SS_IS*prob_testing, 
 					(1 - prob_SS_IS)*prob_testing), axis = -1)
 	
+
+class logistic_SIS():
+	"""A logistic SIS 
+
+	It has the following 
+	methods:
+		- pi_0(parameters): to compute the initial distribution
+		- K_x(parameters, x): to comupte the transition kernel
+		- G_t(parameters): to compute the emission matrix
+	"""
+
+	def __init__(self, covariates):
+		super().__init__()
+		"""Construct the basic SIS
+
+		This creates some quantities that do not change
+
+		Args:
+			covariates: Floating point tensor with shape (N,C), with C number of covariates 
+			representing which parameters are know which are not. The default assume 
+			everything is unknown.
+		"""
+
+		self.covariates = covariates
+
+		self.N = tf.shape(covariates)[0]
+		self.M = 2
+
+	def pi_0(self, parameters):
+		"""
+		The initial probability of being infected
+
+		Args:
+			parameters: a dictionary with the parameters as keys
+		"""
+
+		return parameters["prior_infection"]*tf.ones((self.N, self.M))
+    
+	def K_x(self, parameters, x):
+		"""
+		The stochastic transition matrix computing the probabilities
+		of moving across states given a population state x.
+
+		Args:
+			parameters: a dictionary with the parameters as keys
+			x: Floating point tensor with shape (N,2)
+		"""
+
+		N_float     = tf.cast(self.N, dtype = tf.float32)
+		infectivity = tf.math.exp(tf.einsum("nm,m->n", self.covariates, parameters["b_I"]))
+
+		infectious_pressure = tf.einsum("...n,n->...", x[...,1], infectivity)/N_float
+		susceptibility      = tf.math.exp(parameters["log_beta"]  + tf.einsum("nm,m->n", self.covariates, parameters["b_S"]))
+		
+		recoverability      = tf.math.exp(parameters["log_gamma"] + tf.einsum("nm,m->n", self.covariates, parameters["b_R"]))
+
+		K_t_n_SI = 1 - tf.math.exp(-tf.einsum("...,n->...n", infectious_pressure, susceptibility))
+		K_t_n_SI = tf.expand_dims(K_t_n_SI, axis = -1)
+		K_t_n_S  = tf.concat((1-K_t_n_SI, K_t_n_SI), axis = -1)
+		K_t_n_S  = tf.expand_dims(K_t_n_S, axis = -2)
+
+		K_t_n_IS = 1 - tf.math.exp(-tf.einsum("...,n->...n", tf.ones(tf.shape(infectious_pressure)), recoverability))
+		K_t_n_IS = tf.expand_dims(K_t_n_IS, axis = -1)  
+		K_t_n_I  = tf.concat((K_t_n_IS, 1 - K_t_n_IS), axis = -1)
+		K_t_n_I  = tf.expand_dims(K_t_n_I, axis = -2)
+
+		return tf.concat((K_t_n_S, K_t_n_I), axis  = -2)
+    
+	def G_t(self, parameters):
+		"""
+		The stochastic matrix computing the reporting probabilities.
+		Each row refer to a different state, while the columns refer
+		to the reporting states, with the first one being unreported
+
+		Args:
+			parameters: a dictionary with the parameters as keys
+		"""
+
+		prob_testing = tf.expand_dims(tf.math.sigmoid(parameters["logit_prob_testing"]), axis =0)*tf.ones((self.N, self.M))
+		prob_nontesting =  1- prob_testing
+
+		prob_SS_IS = tf.stack((tf.math.sigmoid(parameters["logit_specificity"]), 
+					1 - tf.math.sigmoid(parameters["logit_sensitivity"])), axis = 1)*tf.ones((self.N, self.M))
+
+		return tf.stack((prob_nontesting, 
+					prob_SS_IS*prob_testing, 
+					(1 - prob_SS_IS)*prob_testing), axis = -1)
+	
+
 
 class simba_SIS():
 	"""A Basic SIS 
@@ -1154,3 +1245,35 @@ class network_SIR():
 # 	start = time.time()
 # 	X, Y = simulator(SIS, parameters, T)
 # 	print(time.time()-start)
+
+# if __name__ == "__main__":
+
+# 	import time
+# 	import tensorflow as tf
+# 	import tensorflow_probability as tfp
+
+# 	N = 1000
+
+# 	covariates = tf.expand_dims(tfp.distributions.Normal(loc = 0.0, scale = 1).sample(N), axis = -1)
+
+# 	SIS = logistic_SIS(covariates)
+
+# 	parameters = {"prior_infection":tf.convert_to_tensor([1-0.01, 0.01], dtype = tf.float32),
+# 		"log_beta":tf.math.log(tf.convert_to_tensor([0.2], dtype = tf.float32)),
+# 		"b_I":tf.convert_to_tensor([+0.3], dtype = tf.float32),
+# 		"b_S":tf.convert_to_tensor([-0.3], dtype = tf.float32),
+# 		"log_gamma":tf.math.log(tf.convert_to_tensor([0.1], dtype = tf.float32)),
+# 		"b_R":tf.convert_to_tensor([+0.2], dtype = tf.float32),
+# 		"logit_sensitivity":logit(
+# 			tf.convert_to_tensor([0.9], dtype = tf.float32)),
+# 		"logit_specificity":logit(
+# 			tf.convert_to_tensor([0.95], dtype = tf.float32)),
+# 		"logit_prob_testing":logit(
+# 			tf.convert_to_tensor([0.2, 0.5], dtype = tf.float32)),}
+	
+# 	T    = 200
+# 	start = time.time()
+# 	X, Y = simulator(SIS, parameters, T)
+# 	print(time.time()-start)
+
+# 	X, Y = X[:,0,...], Y[:,0,...]
