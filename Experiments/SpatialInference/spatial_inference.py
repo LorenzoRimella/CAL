@@ -13,7 +13,7 @@ sys.path.append('CAL/Scripts/')
 from model import *
 from CAL import *
 
-task_id = int(os.getenv("SLURM_ARRAY_TASK_ID"))-1
+task_id =  int(os.getenv("SLURM_ARRAY_TASK_ID"))-1
 
 N_list =  [500, 1000, 2000]
 N      = N_list[task_id]
@@ -36,22 +36,27 @@ tf.config.optimizer.set_jit(True)
 # Load parameters, covariates and locations
 
 parameters = {"prior_infection":tf.convert_to_tensor([1-0.01, 0.01], dtype = tf.float32),
-              "beta_l":tf.convert_to_tensor([-2.0, +2.0], dtype = tf.float32),
-              "beta_g":tf.convert_to_tensor([-1.0, -1.0], dtype = tf.float32),
+	      "log_beta":tf.convert_to_tensor([2.0], dtype = tf.float32),
+	      "b_S":tf.convert_to_tensor([+0.5], dtype = tf.float32),
+              "b_I":tf.convert_to_tensor([+1.0], dtype = tf.float32),
+              "log_gamma":tf.convert_to_tensor([0.1], dtype = tf.float32),
+              "b_R":tf.convert_to_tensor([-0.5], dtype = tf.float32),
               "log_phi":tf.math.log(
-                tf.convert_to_tensor([2.0], dtype = tf.float32)),
-              "log_chi":tf.math.log(
-                tf.convert_to_tensor([50.0], dtype = tf.float32)),
+                tf.convert_to_tensor([1], dtype = tf.float32)),
+              "log_epsilon":tf.math.log(tf.convert_to_tensor([0.0001], dtype = tf.float32)),
               "logit_sensitivity":logit(
                 tf.convert_to_tensor([0.9], dtype = tf.float32)),
               "logit_specificity":logit(
                 tf.convert_to_tensor([0.95], dtype = tf.float32)),
               "logit_prob_testing":logit(
-                tf.convert_to_tensor([0.2, 0.5], dtype = tf.float32)),
-		"log_epsilon":tf.math.log(tf.convert_to_tensor([0.001], dtype = tf.float32)),}
+                tf.convert_to_tensor([0.2, 0.5], dtype = tf.float32))}
 
-locations  = tf.convert_to_tensor(np.load(input_path+"locations.npy"), dtype = tf.float32)[:N,:]
-covariates = tf.convert_to_tensor(np.load(input_path+"covariates.npy"), dtype = tf.float32)[:N,:]
+index             = tf.convert_to_tensor(np.load(input_path+"reshuffle.npy")[:N], dtype = tf.int32)
+location_sample   = tf.convert_to_tensor(np.load(input_path+"locations.npy"), dtype = tf.float32)
+covariates_sample = tf.convert_to_tensor(np.load(input_path+"covariates.npy"), dtype = tf.float32)
+
+covariates = tf.gather(covariates_sample, index, axis = 0)
+locations  = tf.gather(location_sample, index, axis = 0)
 
 T = 200
 n_covergage = 100
@@ -73,12 +78,7 @@ f.writelines(["####################################", "\n"])
 f.writelines(["####################################", "\n"])
 f.close()
 
-learning_parameters = { "beta_l": 2, 
-		"beta_g": 2, 
-		"log_phi": 1, 
-		"log_chi": 1, 
-		"logit_prob_testing": 2
-		}
+learning_parameters = {"log_beta":1, "b_S":1, "b_I":1, "log_gamma":1, "b_R":1, "log_phi":1, "logit_prob_testing":2} 
 
 true_loss_numpy  = np.zeros(n_covergage)
 optim_loss_numpy = np.zeros((n_covergage, n_trial, n_gradient_steps+1))
@@ -119,12 +119,10 @@ for i in range(n_covergage):
 		optimizer = tf.keras.optimizers.Adam(learning_rate = 0.2)
 
 
-		parameters_to_learn = { "prior_infection":tf.convert_to_tensor([1-0.01, 0.01], dtype = tf.float32),
-					"logit_sensitivity":logit(
-						tf.convert_to_tensor([0.9], dtype = tf.float32)),
-					"logit_specificity":logit(
-						tf.convert_to_tensor([0.95], dtype = tf.float32)),
-					"log_epsilon":tf.math.log(tf.convert_to_tensor([0.001], dtype = tf.float32)),}
+		parameters_to_learn = { "prior_infection":parameters["prior_infection"],
+					"log_epsilon":parameters["log_epsilon"],
+					"logit_sensitivity":parameters["logit_sensitivity"],
+					"logit_specificity":parameters["logit_specificity"]}
 
 		seed_optim, seed_carry = tfp.random.split_seed( seed_carry, n = 2, salt = "seed_for_optimization")
 		loss_tensor, parameters_tensor = CAL_inference(SIS, parameters_to_learn, Y, learning_parameters, optimizer, n_gradient_steps, seed_optim, "random")

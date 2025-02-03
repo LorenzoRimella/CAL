@@ -171,7 +171,7 @@ def CAL_inference(ibm, parameters, y, learning_parameters, optimizer, n_gradient
 		seed_optim, seed_carry = tfp.random.split_seed( seed_optim, n = 2, salt = "seed_for_optimization")
 		for key in learning_parameters.keys():
 
-			parameters[key] = tf.Variable(tfp.distributions.Normal(loc = 0.0, scale = 1.0).sample(learning_parameters[key], seed = seed_optim), dtype = tf.float32)
+			parameters[key] = tf.Variable(tfp.distributions.Normal(loc = 0.0, scale = 0.5).sample(learning_parameters[key], seed = seed_optim), dtype = tf.float32)
 
 			seed_optim, seed_carry = tfp.random.split_seed( seed_carry, n = 2, salt = "seed_for_optimization")
 
@@ -180,7 +180,7 @@ def CAL_inference(ibm, parameters, y, learning_parameters, optimizer, n_gradient
 		while tf.math.is_nan(current_loss):
 			for key in learning_parameters.keys():
 
-				parameters[key] = tf.Variable(tfp.distributions.Normal(loc = 0.0, scale = 1.0).sample(learning_parameters[key], seed = seed_optim), dtype = tf.float32)
+				parameters[key] = tf.Variable(tfp.distributions.Normal(loc = 0.0, scale = 0.5).sample(learning_parameters[key], seed = seed_optim), dtype = tf.float32)
 
 			seed_optim, seed_carry = tfp.random.split_seed( seed_carry, n = 2, salt = "seed_for_optimization")
 

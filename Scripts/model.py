@@ -530,28 +530,6 @@ class simba_SEIR():
 			parameters: a dictionary with the parameters as keys
 			x: Floating point tensor with shape (N,2)
 		"""
-   
-		# W                       = self.covariates
-		# beta_lambda, beta_gamma, epsilon, rho = parameters["beta_l"], parameters["beta_g"], tf.math.exp(parameters["iota"]), tf.math.exp(parameters["rho"])
-
-		# lambda__n = 1/(1+tf.exp(-tf.einsum("ij,...j->...i", W, beta_lambda)))
-		# gamma__n  = 1/(1+tf.exp(-tf.einsum("ij,...j->...i", W, beta_gamma)))
-
-		# c_tm1 = tf.reduce_sum( x, axis = -2, keepdims = True ) - x
-
-		# N = tf.cast(tf.shape(W)[0], dtype = tf.float32)
-
-		# rate_SE   = tf.expand_dims(tf.expand_dims(1-tf.exp(-lambda__n*((c_tm1[...,2]/N)+epsilon)), axis =-1), axis =-1)
-		# rate_EI   = tf.expand_dims(tf.expand_dims(1 - tf.exp(-rho), axis = -1), axis = -1)*tf.ones(tf.shape(rate_SE))
-		# rate_IR   = tf.expand_dims(tf.expand_dims(1-tf.exp(-gamma__n), axis =-1), axis =-1)*tf.ones(tf.shape(rate_SE))
-
-		# K_eta_h__n_r1 = tf.concat((1 - rate_SE, rate_SE, tf.zeros(tf.shape(rate_SE)), tf.zeros(tf.shape(rate_SE))), axis = -1)
-		# K_eta_h__n_r2 = tf.concat((tf.zeros(tf.shape(rate_SE)), 1 - rate_EI, rate_EI, tf.zeros(tf.shape(rate_SE))), axis = -1)    
-		# K_eta_h__n_r3 = tf.concat((tf.zeros(tf.shape(rate_SE)), tf.zeros(tf.shape(rate_SE)), 1 - rate_IR, rate_IR), axis = -1)
-		# K_eta_h__n_r4 = tf.concat((tf.zeros(tf.shape(rate_SE)), tf.zeros(tf.shape(rate_SE)), tf.zeros(tf.shape(rate_SE)), tf.ones(tf.shape(rate_SE))), axis = -1)
-		# K_eta_h__n    = tf.concat((K_eta_h__n_r1, K_eta_h__n_r2, K_eta_h__n_r3, K_eta_h__n_r4), axis = -2)
-
-		# return K_eta_h__n
 
 		N_float = tf.cast(self.N, dtype = tf.float32)
 
@@ -640,11 +618,7 @@ class spatial_SIS():
 		d_2 = tf.math.pow(self.locations[:,1:2] - tf.transpose(self.locations[:,1:2]), 2)
 		d = tf.math.sqrt(d_1 + d_2)
 
-		spatial_matrix = tf.math.exp(parameters["log_chi"])*tfp.distributions.Normal(loc = 0, scale = tf.math.exp(parameters["log_phi"]/2)).prob(d)
-		mask           = 1-tf.eye(self.N)
-
-		# remove the diagonal (individuals cannot infect themselves)
-		spatial_matrix = spatial_matrix*mask
+		spatial_matrix = tfp.distributions.Normal(loc = 0, scale = tf.math.exp(parameters["log_phi"])).prob(d)
 
 		return spatial_matrix
 
@@ -670,133 +644,18 @@ class spatial_SIS():
 
 		N_float = tf.cast(self.N, dtype = tf.float32)
 
-		infectious_pressure = tf.einsum("...i,ji->...j", x[...,1], self.spatial_matrix(parameters) )/N_float
-		susceptibility      = tf.einsum("nm,m->n", self.covariates, parameters["beta_l"])
-		recoverability      = tf.einsum("nm,m->n", self.covariates, parameters["beta_g"])
+		infectivity         = tf.math.exp(tf.einsum("nm,m->n", self.covariates, parameters["b_I"]))
+		infectious_pressure = tf.einsum("...i,ji->...j", infectivity*x[...,1], self.spatial_matrix(parameters) )/N_float
 
-		K_t_n_SI =  1 - tf.math.exp(-tf.einsum("...n,n->...n", infectious_pressure, 1/(1+tf.math.exp(-susceptibility))) - tf.math.exp(parameters["log_epsilon"]))
+		susceptibility      = tf.math.exp( parameters["log_beta"]  + tf.einsum("nm,m->n", self.covariates, parameters["b_S"]))
+		recoverability      = tf.math.exp( parameters["log_gamma"] + tf.einsum("nm,m->n", self.covariates, parameters["b_R"]))
+
+		K_t_n_SI =  1 - tf.math.exp(-tf.einsum("...n,n->...n", infectious_pressure, susceptibility) - tf.math.exp(parameters["log_epsilon"]))
 		K_t_n_SI = tf.expand_dims(K_t_n_SI, axis = -1)
 		K_t_n_S  = tf.concat((1-K_t_n_SI, K_t_n_SI), axis = -1)
 		K_t_n_S  = tf.expand_dims(K_t_n_S, axis = -2)
 
-		K_t_n_IS = 1 - tf.math.exp(-tf.einsum("...n,n->...n", tf.ones(tf.shape(infectious_pressure)), 1/(1+tf.math.exp(-recoverability))))
-		K_t_n_IS = tf.expand_dims(K_t_n_IS, axis = -1)  
-		K_t_n_I  = tf.concat((K_t_n_IS, 1 - K_t_n_IS), axis = -1)
-		K_t_n_I  = tf.expand_dims(K_t_n_I, axis = -2)
-
-		return tf.concat((K_t_n_S, K_t_n_I), axis  = -2)
-    
-	def G_t(self, parameters):
-		"""
-		The stochastic matrix computing the reporting probabilities.
-		Each row refer to a different state, while the columns refer
-		to the reporting states, with the first one being unreported
-
-		Args:
-			parameters: a dictionary with the parameters as keys
-		"""
-
-		prob_testing = tf.expand_dims(tf.math.sigmoid(parameters["logit_prob_testing"]), axis =0)*tf.ones((self.N, self.M))
-		prob_nontesting =  1- prob_testing
-
-		prob_SS_IS = tf.stack((tf.math.sigmoid(parameters["logit_specificity"]), 
-					1 - tf.math.sigmoid(parameters["logit_sensitivity"])), axis = 1)*tf.ones((self.N, self.M))
-
-		return tf.stack((prob_nontesting, 
-					prob_SS_IS*prob_testing, 
-					(1 - prob_SS_IS)*prob_testing), axis = -1)
-
-class old_spatial_SIS():
-	"""A Spatial SIS 
-
-	We implement a spatial SIS model where each individual has a
-	location and some individual specific covariates. This qualify as
-	an individual based model object, meaning that it has the following 
-	methods:
-		- pi_0(parameters): to compute the initial distribution
-		- K_x(parameters, x): to comupte the transition kernel
-		- G_t(parameters): to compute the emission matrix
-	"""
-
-	def __init__(self, locations, covariates):
-		super().__init__()
-		"""Construct the spatial SIS
-
-		This creates some quantities that do not change
-
-		Args:
-			locations: Floating point tensor with shape (N,2)
-			covariates: Floating point tensor with shape (N,C), with C number of covariates 
-			representing which parameters are know which are not. The default assume 
-			everything is unknown.
-		"""
-
-		self.locations  = locations
-		self.covariates = covariates
-
-		self.N = tf.shape(covariates)[0]
-		self.M = 2
-
-	def spatial_matrix(self, parameters):
-		"""
-
-		This build the interaction matrix using a Gaussian kernel. The rows
-		of the matrix are normalized to sum to N.
-
-		Args:
-			parameters: a dictionary with the parameters as keys
-		"""
-
-		d_1 = tf.math.pow(self.locations[:,0:1] - tf.transpose(self.locations[:,0:1]), 2)
-		d_2 = tf.math.pow(self.locations[:,1:2] - tf.transpose(self.locations[:,1:2]), 2)
-		d = tf.math.sqrt(d_1 + d_2)
-
-		spatial_matrix = tfp.distributions.Normal(loc = 0, scale = tf.math.exp(parameters["log_phi"])).prob(d)
-		mask           = 1-tf.eye(self.N)
-
-		# remove the diagonal (individuals cannot infect themselves)
-		spatial_matrix = spatial_matrix*mask
-
-		# rows_normaliz = tf.reduce_sum(tf.linalg.band_part(new_matrix, 0, -1), axis =1, keepdims=True)
-		# cols_normaliz = tf.reduce_sum(tf.linalg.band_part(new_matrix, 0, -1), axis =0, keepdims=True)
-
-		# den_rows_normaliz = rows_normaliz + tf.expand_dims(tf.one_hot(tf.shape(rows_normaliz)[0]-1, tf.shape(rows_normaliz)[0]), axis = 1)
-
-		# self_normalized = tf.linalg.band_part(new_matrix, 0, -1)/(rows_normaliz + tf.transpose(cols_normaliz)/den_rows_normaliz)
-		# self_normalized = self_normalized + tf.transpose(self_normalized)
-
-		return spatial_matrix/tf.reduce_sum(spatial_matrix, axis = 1, keepdims=True)
-
-	def pi_0(self, parameters):
-		"""
-		The initial probability of being infected
-
-		Args:
-			parameters: a dictionary with the parameters as keys
-		"""
-
-		return parameters["prior_infection"]*tf.ones((self.N, self.M))
-    
-	def K_x(self, parameters, x):
-		"""
-		The stochastic transition matrix computing the probabilities
-		of moving across states given a population state x.
-
-		Args:
-			parameters: a dictionary with the parameters as keys
-			x: Floating point tensor with shape (N,2)
-		"""
-
-		infectious_pressure = tf.einsum("...i,ji->...j", x[...,1], self.spatial_matrix(parameters) )
-		susceptibility      = tf.einsum("nm,m->n", self.covariates, parameters["beta_l"])
-		recoverability      = tf.einsum("nm,m->n", self.covariates, parameters["beta_g"])
-
-		K_t_n_SI = tf.einsum("...n,n->...n", infectious_pressure, 1/(1+tf.math.exp(-susceptibility)))
-		K_t_n_SI = tf.expand_dims(K_t_n_SI, axis = -1)
-		K_t_n_S  = tf.concat((1-K_t_n_SI, K_t_n_SI), axis = -1)
-		K_t_n_S  = tf.expand_dims(K_t_n_S, axis = -2)
-
-		K_t_n_IS = tf.einsum("...n,n->...n", tf.ones(tf.shape(infectious_pressure)), 1/(1+tf.math.exp(-recoverability)))
+		K_t_n_IS = 1 - tf.math.exp(-tf.einsum("...n,n->...n", tf.ones(tf.shape(infectious_pressure)), recoverability))
 		K_t_n_IS = tf.expand_dims(K_t_n_IS, axis = -1)  
 		K_t_n_I  = tf.concat((K_t_n_IS, 1 - K_t_n_IS), axis = -1)
 		K_t_n_I  = tf.expand_dims(K_t_n_I, axis = -2)
@@ -823,8 +682,7 @@ class old_spatial_SIS():
 					prob_SS_IS*prob_testing, 
 					(1 - prob_SS_IS)*prob_testing), axis = -1)
 	
-
-class spatial_SIS_env():
+class spatial_SIR():
 	"""A Spatial SIS 
 
 	We implement a spatial SIS model where each individual has a
@@ -836,7 +694,7 @@ class spatial_SIS_env():
 		- G_t(parameters): to compute the emission matrix
 	"""
 
-	def __init__(self, locations, covariates):
+	def __init__(self, locations, covariates, observed_index):
 		super().__init__()
 		"""Construct the spatial SIS
 
@@ -851,9 +709,10 @@ class spatial_SIS_env():
 
 		self.locations  = locations
 		self.covariates = covariates
+		self.observed_index = observed_index
 
 		self.N = tf.shape(covariates)[0]
-		self.M = 2
+		self.M = 3
 
 	def spatial_matrix(self, parameters):
 		"""
@@ -870,18 +729,6 @@ class spatial_SIS_env():
 		d = tf.math.sqrt(d_1 + d_2)
 
 		spatial_matrix = tfp.distributions.Normal(loc = 0, scale = tf.math.exp(parameters["log_phi"])).prob(d)
-		mask           = 1-tf.eye(self.N)
-
-		# remove the diagonal (individuals cannot infect themselves)
-		spatial_matrix = spatial_matrix*mask
-
-		# rows_normaliz = tf.reduce_sum(tf.linalg.band_part(new_matrix, 0, -1), axis =1, keepdims=True)
-		# cols_normaliz = tf.reduce_sum(tf.linalg.band_part(new_matrix, 0, -1), axis =0, keepdims=True)
-
-		# den_rows_normaliz = rows_normaliz + tf.expand_dims(tf.one_hot(tf.shape(rows_normaliz)[0]-1, tf.shape(rows_normaliz)[0]), axis = 1)
-
-		# self_normalized = tf.linalg.band_part(new_matrix, 0, -1)/(rows_normaliz + tf.transpose(cols_normaliz)/den_rows_normaliz)
-		# self_normalized = self_normalized + tf.transpose(self_normalized)
 
 		return spatial_matrix
 
@@ -893,7 +740,15 @@ class spatial_SIS_env():
 			parameters: a dictionary with the parameters as keys
 		"""
 
-		return parameters["prior_infection"]*tf.ones((self.N, self.M))
+		initial_infected_index = tf.reduce_all(tf.stack((self.locations[:,0]<tf.reduce_max(self.locations[:,0])/2, 
+						   		 self.locations[:,1]>tf.reduce_max(self.locations[:,1])*0.8), axis = -1), axis = -1)
+		
+		mask = tf.expand_dims(tf.cast(initial_infected_index, dtype = tf.float32), axis = -1)
+
+		prior_infection_1 = tf.stack((tf.ones(self.N), tf.zeros(self.N), tf.zeros(self.N)), axis = -1)
+		prior_infection_2 = parameters["prior_infection"]*tf.ones((self.N, self.M))
+
+		return mask*prior_infection_2 + (1-mask)*prior_infection_1
     
 	def K_x(self, parameters, x):
 		"""
@@ -905,21 +760,28 @@ class spatial_SIS_env():
 			x: Floating point tensor with shape (N,2)
 		"""
 
-		infectious_pressure = tf.einsum("...i,ji->...j", x[...,1], self.spatial_matrix(parameters) ) + tf.math.exp(parameters["log_epsilon"])
-		susceptibility      = tf.einsum("nm,m->n", self.covariates, parameters["beta_l"])
-		recoverability      = tf.einsum("nm,m->n", self.covariates, parameters["beta_g"])
+		N_float = tf.cast(self.N, dtype = tf.float32)
 
-		K_t_n_SI = 1 - tf.math.exp(-tf.einsum("...n,n->...n", infectious_pressure, 1/(1+tf.math.exp(-susceptibility))))
+		infectivity         = tf.math.exp(tf.einsum("nm,m->n", self.covariates, parameters["b_I"]))
+		infectious_pressure = tf.einsum("...i,ji->...j", infectivity*x[...,1], self.spatial_matrix(parameters) )/N_float
+
+		susceptibility      = tf.math.exp( parameters["log_beta"]  + tf.einsum("nm,m->n", self.covariates, parameters["b_S"]))
+		recoverability      = tf.math.exp( parameters["log_gamma"] + tf.einsum("nm,m->n", self.covariates, parameters["b_R"]))
+
+		K_t_n_SI =  1 - tf.math.exp(-tf.einsum("...n,n->...n", infectious_pressure, susceptibility) - tf.math.exp(parameters["log_epsilon"]))
 		K_t_n_SI = tf.expand_dims(K_t_n_SI, axis = -1)
-		K_t_n_S  = tf.concat((1-K_t_n_SI, K_t_n_SI), axis = -1)
+		K_t_n_S  = tf.concat((1-K_t_n_SI, K_t_n_SI, tf.zeros(tf.shape(K_t_n_SI))), axis = -1)
 		K_t_n_S  = tf.expand_dims(K_t_n_S, axis = -2)
 
-		K_t_n_IS = tf.einsum("...n,n->...n", tf.ones(tf.shape(infectious_pressure)), 1/(1+tf.math.exp(-recoverability)))
-		K_t_n_IS = tf.expand_dims(K_t_n_IS, axis = -1)  
-		K_t_n_I  = tf.concat((K_t_n_IS, 1 - K_t_n_IS), axis = -1)
+		K_t_n_IR = 1 - tf.math.exp(-tf.einsum("...n,n->...n", tf.ones(tf.shape(infectious_pressure)), recoverability))
+		K_t_n_IR = tf.expand_dims(K_t_n_IR, axis = -1)  
+		K_t_n_I  = tf.concat((tf.zeros(tf.shape(K_t_n_IR)), 1 - K_t_n_IR, K_t_n_IR), axis = -1)
 		K_t_n_I  = tf.expand_dims(K_t_n_I, axis = -2)
 
-		return tf.concat((K_t_n_S, K_t_n_I), axis  = -2)
+		K_t_n_R  = tf.concat((tf.zeros(tf.shape(K_t_n_IR)), tf.zeros(tf.shape(K_t_n_IR)), tf.ones(tf.shape(K_t_n_IR))), axis = -1)
+		K_t_n_R  = tf.expand_dims(K_t_n_R, axis = -2)
+
+		return tf.concat((K_t_n_S, K_t_n_I, K_t_n_R), axis  = -2)
     
 	def G_t(self, parameters):
 		"""
@@ -931,15 +793,360 @@ class spatial_SIS_env():
 			parameters: a dictionary with the parameters as keys
 		"""
 
-		prob_testing = tf.expand_dims(tf.math.sigmoid(parameters["logit_prob_testing"]), axis =0)*tf.ones((self.N, self.M))
-		prob_nontesting =  1- prob_testing
+		prob_testing = tf.linalg.diag(tf.math.sigmoid(parameters["logit_prob_testing"]))
 
-		prob_SS_IS = tf.stack((tf.math.sigmoid(parameters["logit_specificity"]), 
-					1 - tf.math.sigmoid(parameters["logit_sensitivity"])), axis = 1)*tf.ones((self.N, self.M))
+		G_common     = tf.concat((tf.expand_dims(1 - tf.math.sigmoid(parameters["logit_prob_testing"]), axis = -1), prob_testing), axis = -1)
+		G_unobserved = tf.concat((tf.expand_dims(tf.ones(tf.shape(parameters["logit_prob_testing"])), axis = -1), tf.zeros(tf.shape(prob_testing))), axis = -1)
 
-		return tf.stack((prob_nontesting, 
-					prob_SS_IS*prob_testing, 
-					(1 - prob_SS_IS)*prob_testing), axis = -1)
+		mask = tf.expand_dims(tf.expand_dims(self.observed_index, axis = -1), axis = -1)*tf.ones((self.N, self.M, self.M+1))
+
+		return tf.expand_dims(G_common, axis = 0)*mask + tf.expand_dims(G_unobserved, axis = 0)*(1 - mask)
+
+# class spatial_SIS():
+# 	"""A Spatial SIS 
+
+# 	We implement a spatial SIS model where each individual has a
+# 	location and some individual specific covariates. This qualify as
+# 	an individual based model object, meaning that it has the following 
+# 	methods:
+# 		- pi_0(parameters): to compute the initial distribution
+# 		- K_x(parameters, x): to comupte the transition kernel
+# 		- G_t(parameters): to compute the emission matrix
+# 	"""
+
+# 	def __init__(self, locations, covariates):
+# 		super().__init__()
+# 		"""Construct the spatial SIS
+
+# 		This creates some quantities that do not change
+
+# 		Args:
+# 			locations: Floating point tensor with shape (N,2)
+# 			covariates: Floating point tensor with shape (N,C), with C number of covariates 
+# 			representing which parameters are know which are not. The default assume 
+# 			everything is unknown.
+# 		"""
+
+# 		self.locations  = locations
+# 		self.covariates = covariates
+
+# 		self.N = tf.shape(covariates)[0]
+# 		self.M = 2
+
+# 	def spatial_matrix(self, parameters):
+# 		"""
+
+# 		This build the interaction matrix using a Gaussian kernel. The rows
+# 		of the matrix are normalized to sum to N.
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 		"""
+
+# 		d_1 = tf.math.pow(self.locations[:,0:1] - tf.transpose(self.locations[:,0:1]), 2)
+# 		d_2 = tf.math.pow(self.locations[:,1:2] - tf.transpose(self.locations[:,1:2]), 2)
+# 		d = tf.math.sqrt(d_1 + d_2)
+
+# 		spatial_matrix = tf.math.exp(parameters["log_chi"])*tfp.distributions.Normal(loc = 0, scale = tf.math.exp(parameters["log_phi"]/2)).prob(d)
+# 		mask           = 1-tf.eye(self.N)
+
+# 		# remove the diagonal (individuals cannot infect themselves)
+# 		spatial_matrix = spatial_matrix*mask
+
+# 		return spatial_matrix
+
+# 	def pi_0(self, parameters):
+# 		"""
+# 		The initial probability of being infected
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 		"""
+
+# 		return parameters["prior_infection"]*tf.ones((self.N, self.M))
+    
+# 	def K_x(self, parameters, x):
+# 		"""
+# 		The stochastic transition matrix computing the probabilities
+# 		of moving across states given a population state x.
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 			x: Floating point tensor with shape (N,2)
+# 		"""
+
+# 		N_float = tf.cast(self.N, dtype = tf.float32)
+
+# 		infectious_pressure = tf.einsum("...i,ji->...j", x[...,1], self.spatial_matrix(parameters) )/N_float
+# 		susceptibility      = tf.einsum("nm,m->n", self.covariates, parameters["beta_l"])
+# 		recoverability      = tf.einsum("nm,m->n", self.covariates, parameters["beta_g"])
+
+# 		K_t_n_SI =  1 - tf.math.exp(-tf.einsum("...n,n->...n", infectious_pressure, 1/(1+tf.math.exp(-susceptibility))) - tf.math.exp(parameters["log_epsilon"]))
+# 		K_t_n_SI = tf.expand_dims(K_t_n_SI, axis = -1)
+# 		K_t_n_S  = tf.concat((1-K_t_n_SI, K_t_n_SI), axis = -1)
+# 		K_t_n_S  = tf.expand_dims(K_t_n_S, axis = -2)
+
+# 		K_t_n_IS = 1 - tf.math.exp(-tf.einsum("...n,n->...n", tf.ones(tf.shape(infectious_pressure)), 1/(1+tf.math.exp(-recoverability))))
+# 		K_t_n_IS = tf.expand_dims(K_t_n_IS, axis = -1)  
+# 		K_t_n_I  = tf.concat((K_t_n_IS, 1 - K_t_n_IS), axis = -1)
+# 		K_t_n_I  = tf.expand_dims(K_t_n_I, axis = -2)
+
+# 		return tf.concat((K_t_n_S, K_t_n_I), axis  = -2)
+    
+# 	def G_t(self, parameters):
+# 		"""
+# 		The stochastic matrix computing the reporting probabilities.
+# 		Each row refer to a different state, while the columns refer
+# 		to the reporting states, with the first one being unreported
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 		"""
+
+# 		prob_testing = tf.expand_dims(tf.math.sigmoid(parameters["logit_prob_testing"]), axis =0)*tf.ones((self.N, self.M))
+# 		prob_nontesting =  1- prob_testing
+
+# 		prob_SS_IS = tf.stack((tf.math.sigmoid(parameters["logit_specificity"]), 
+# 					1 - tf.math.sigmoid(parameters["logit_sensitivity"])), axis = 1)*tf.ones((self.N, self.M))
+
+# 		return tf.stack((prob_nontesting, 
+# 					prob_SS_IS*prob_testing, 
+# 					(1 - prob_SS_IS)*prob_testing), axis = -1)
+
+# class old_spatial_SIS():
+# 	"""A Spatial SIS 
+
+# 	We implement a spatial SIS model where each individual has a
+# 	location and some individual specific covariates. This qualify as
+# 	an individual based model object, meaning that it has the following 
+# 	methods:
+# 		- pi_0(parameters): to compute the initial distribution
+# 		- K_x(parameters, x): to comupte the transition kernel
+# 		- G_t(parameters): to compute the emission matrix
+# 	"""
+
+# 	def __init__(self, locations, covariates):
+# 		super().__init__()
+# 		"""Construct the spatial SIS
+
+# 		This creates some quantities that do not change
+
+# 		Args:
+# 			locations: Floating point tensor with shape (N,2)
+# 			covariates: Floating point tensor with shape (N,C), with C number of covariates 
+# 			representing which parameters are know which are not. The default assume 
+# 			everything is unknown.
+# 		"""
+
+# 		self.locations  = locations
+# 		self.covariates = covariates
+
+# 		self.N = tf.shape(covariates)[0]
+# 		self.M = 2
+
+# 	def spatial_matrix(self, parameters):
+# 		"""
+
+# 		This build the interaction matrix using a Gaussian kernel. The rows
+# 		of the matrix are normalized to sum to N.
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 		"""
+
+# 		d_1 = tf.math.pow(self.locations[:,0:1] - tf.transpose(self.locations[:,0:1]), 2)
+# 		d_2 = tf.math.pow(self.locations[:,1:2] - tf.transpose(self.locations[:,1:2]), 2)
+# 		d = tf.math.sqrt(d_1 + d_2)
+
+# 		spatial_matrix = tfp.distributions.Normal(loc = 0, scale = tf.math.exp(parameters["log_phi"])).prob(d)
+# 		mask           = 1-tf.eye(self.N)
+
+# 		# remove the diagonal (individuals cannot infect themselves)
+# 		spatial_matrix = spatial_matrix*mask
+
+# 		# rows_normaliz = tf.reduce_sum(tf.linalg.band_part(new_matrix, 0, -1), axis =1, keepdims=True)
+# 		# cols_normaliz = tf.reduce_sum(tf.linalg.band_part(new_matrix, 0, -1), axis =0, keepdims=True)
+
+# 		# den_rows_normaliz = rows_normaliz + tf.expand_dims(tf.one_hot(tf.shape(rows_normaliz)[0]-1, tf.shape(rows_normaliz)[0]), axis = 1)
+
+# 		# self_normalized = tf.linalg.band_part(new_matrix, 0, -1)/(rows_normaliz + tf.transpose(cols_normaliz)/den_rows_normaliz)
+# 		# self_normalized = self_normalized + tf.transpose(self_normalized)
+
+# 		return spatial_matrix/tf.reduce_sum(spatial_matrix, axis = 1, keepdims=True)
+
+# 	def pi_0(self, parameters):
+# 		"""
+# 		The initial probability of being infected
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 		"""
+
+# 		return parameters["prior_infection"]*tf.ones((self.N, self.M))
+    
+# 	def K_x(self, parameters, x):
+# 		"""
+# 		The stochastic transition matrix computing the probabilities
+# 		of moving across states given a population state x.
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 			x: Floating point tensor with shape (N,2)
+# 		"""
+
+# 		infectious_pressure = tf.einsum("...i,ji->...j", x[...,1], self.spatial_matrix(parameters) )
+# 		susceptibility      = tf.einsum("nm,m->n", self.covariates, parameters["beta_l"])
+# 		recoverability      = tf.einsum("nm,m->n", self.covariates, parameters["beta_g"])
+
+# 		K_t_n_SI = tf.einsum("...n,n->...n", infectious_pressure, 1/(1+tf.math.exp(-susceptibility)))
+# 		K_t_n_SI = tf.expand_dims(K_t_n_SI, axis = -1)
+# 		K_t_n_S  = tf.concat((1-K_t_n_SI, K_t_n_SI), axis = -1)
+# 		K_t_n_S  = tf.expand_dims(K_t_n_S, axis = -2)
+
+# 		K_t_n_IS = tf.einsum("...n,n->...n", tf.ones(tf.shape(infectious_pressure)), 1/(1+tf.math.exp(-recoverability)))
+# 		K_t_n_IS = tf.expand_dims(K_t_n_IS, axis = -1)  
+# 		K_t_n_I  = tf.concat((K_t_n_IS, 1 - K_t_n_IS), axis = -1)
+# 		K_t_n_I  = tf.expand_dims(K_t_n_I, axis = -2)
+
+# 		return tf.concat((K_t_n_S, K_t_n_I), axis  = -2)
+    
+# 	def G_t(self, parameters):
+# 		"""
+# 		The stochastic matrix computing the reporting probabilities.
+# 		Each row refer to a different state, while the columns refer
+# 		to the reporting states, with the first one being unreported
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 		"""
+
+# 		prob_testing = tf.expand_dims(tf.math.sigmoid(parameters["logit_prob_testing"]), axis =0)*tf.ones((self.N, self.M))
+# 		prob_nontesting =  1- prob_testing
+
+# 		prob_SS_IS = tf.stack((tf.math.sigmoid(parameters["logit_specificity"]), 
+# 					1 - tf.math.sigmoid(parameters["logit_sensitivity"])), axis = 1)*tf.ones((self.N, self.M))
+
+# 		return tf.stack((prob_nontesting, 
+# 					prob_SS_IS*prob_testing, 
+# 					(1 - prob_SS_IS)*prob_testing), axis = -1)
+	
+
+# class spatial_SIS_env():
+# 	"""A Spatial SIS 
+
+# 	We implement a spatial SIS model where each individual has a
+# 	location and some individual specific covariates. This qualify as
+# 	an individual based model object, meaning that it has the following 
+# 	methods:
+# 		- pi_0(parameters): to compute the initial distribution
+# 		- K_x(parameters, x): to comupte the transition kernel
+# 		- G_t(parameters): to compute the emission matrix
+# 	"""
+
+# 	def __init__(self, locations, covariates):
+# 		super().__init__()
+# 		"""Construct the spatial SIS
+
+# 		This creates some quantities that do not change
+
+# 		Args:
+# 			locations: Floating point tensor with shape (N,2)
+# 			covariates: Floating point tensor with shape (N,C), with C number of covariates 
+# 			representing which parameters are know which are not. The default assume 
+# 			everything is unknown.
+# 		"""
+
+# 		self.locations  = locations
+# 		self.covariates = covariates
+
+# 		self.N = tf.shape(covariates)[0]
+# 		self.M = 2
+
+# 	def spatial_matrix(self, parameters):
+# 		"""
+
+# 		This build the interaction matrix using a Gaussian kernel. The rows
+# 		of the matrix are normalized to sum to N.
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 		"""
+
+# 		d_1 = tf.math.pow(self.locations[:,0:1] - tf.transpose(self.locations[:,0:1]), 2)
+# 		d_2 = tf.math.pow(self.locations[:,1:2] - tf.transpose(self.locations[:,1:2]), 2)
+# 		d = tf.math.sqrt(d_1 + d_2)
+
+# 		spatial_matrix = tfp.distributions.Normal(loc = 0, scale = tf.math.exp(parameters["log_phi"])).prob(d)
+# 		mask           = 1-tf.eye(self.N)
+
+# 		# remove the diagonal (individuals cannot infect themselves)
+# 		spatial_matrix = spatial_matrix*mask
+
+# 		# rows_normaliz = tf.reduce_sum(tf.linalg.band_part(new_matrix, 0, -1), axis =1, keepdims=True)
+# 		# cols_normaliz = tf.reduce_sum(tf.linalg.band_part(new_matrix, 0, -1), axis =0, keepdims=True)
+
+# 		# den_rows_normaliz = rows_normaliz + tf.expand_dims(tf.one_hot(tf.shape(rows_normaliz)[0]-1, tf.shape(rows_normaliz)[0]), axis = 1)
+
+# 		# self_normalized = tf.linalg.band_part(new_matrix, 0, -1)/(rows_normaliz + tf.transpose(cols_normaliz)/den_rows_normaliz)
+# 		# self_normalized = self_normalized + tf.transpose(self_normalized)
+
+# 		return spatial_matrix
+
+# 	def pi_0(self, parameters):
+# 		"""
+# 		The initial probability of being infected
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 		"""
+
+# 		return parameters["prior_infection"]*tf.ones((self.N, self.M))
+    
+# 	def K_x(self, parameters, x):
+# 		"""
+# 		The stochastic transition matrix computing the probabilities
+# 		of moving across states given a population state x.
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 			x: Floating point tensor with shape (N,2)
+# 		"""
+
+# 		infectious_pressure = tf.einsum("...i,ji->...j", x[...,1], self.spatial_matrix(parameters) ) + tf.math.exp(parameters["log_epsilon"])
+# 		susceptibility      = tf.einsum("nm,m->n", self.covariates, parameters["beta_l"])
+# 		recoverability      = tf.einsum("nm,m->n", self.covariates, parameters["beta_g"])
+
+# 		K_t_n_SI = 1 - tf.math.exp(-tf.einsum("...n,n->...n", infectious_pressure, 1/(1+tf.math.exp(-susceptibility))))
+# 		K_t_n_SI = tf.expand_dims(K_t_n_SI, axis = -1)
+# 		K_t_n_S  = tf.concat((1-K_t_n_SI, K_t_n_SI), axis = -1)
+# 		K_t_n_S  = tf.expand_dims(K_t_n_S, axis = -2)
+
+# 		K_t_n_IS = tf.einsum("...n,n->...n", tf.ones(tf.shape(infectious_pressure)), 1/(1+tf.math.exp(-recoverability)))
+# 		K_t_n_IS = tf.expand_dims(K_t_n_IS, axis = -1)  
+# 		K_t_n_I  = tf.concat((K_t_n_IS, 1 - K_t_n_IS), axis = -1)
+# 		K_t_n_I  = tf.expand_dims(K_t_n_I, axis = -2)
+
+# 		return tf.concat((K_t_n_S, K_t_n_I), axis  = -2)
+    
+# 	def G_t(self, parameters):
+# 		"""
+# 		The stochastic matrix computing the reporting probabilities.
+# 		Each row refer to a different state, while the columns refer
+# 		to the reporting states, with the first one being unreported
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 		"""
+
+# 		prob_testing = tf.expand_dims(tf.math.sigmoid(parameters["logit_prob_testing"]), axis =0)*tf.ones((self.N, self.M))
+# 		prob_nontesting =  1- prob_testing
+
+# 		prob_SS_IS = tf.stack((tf.math.sigmoid(parameters["logit_specificity"]), 
+# 					1 - tf.math.sigmoid(parameters["logit_sensitivity"])), axis = 1)*tf.ones((self.N, self.M))
+
+# 		return tf.stack((prob_nontesting, 
+# 					prob_SS_IS*prob_testing, 
+# 					(1 - prob_SS_IS)*prob_testing), axis = -1)
 
 class sbm_SIS():
 	"""A stochastic block model SIS 
@@ -953,7 +1160,7 @@ class sbm_SIS():
 		- G_t(parameters): to compute the emission matrix
 	"""
 
-	def __init__(self, communities, covariates):
+	def __init__(self, communities, centroids, covariates):
 		super().__init__()
 		"""Construct the spatial SIS
 
@@ -966,7 +1173,8 @@ class sbm_SIS():
 			everything is unknown.
 		"""
 
-		self.communities = communities
+		self.communities = tf.one_hot(indices = tf.cast(communities[:,0], tf.int32), depth = tf.cast(tf.shape(centroids)[0], tf.int32), dtype = tf.float32)
+		self.centroids   = centroids
 		self.covariates  = covariates
 
 		self.N = tf.shape(covariates)[0]
@@ -983,16 +1191,14 @@ class sbm_SIS():
 		return parameters["prior_infection"]*tf.ones((self.N, self.M))
 	
 	def B_matrix(self, parameters):
-		
-		Ncommunities = tf.shape(self.communities)[1]
-		beta = tf.math.exp(parameters["log_graph"])
 
-		B = tf.math.exp(-beta)*tf.eye(Ncommunities)
-		sovra_diag       = tf.concat((tf.concat((tf.zeros((Ncommunities-1, 1)), tf.eye(Ncommunities-1)), axis = 1), tf.zeros((1, Ncommunities))), axis = 0)
-		sovra_sovra_diag = tf.concat((tf.concat((tf.zeros((Ncommunities-1, 1)), sovra_diag[:-1,:-1]), axis = 1), tf.zeros((1, Ncommunities))), axis = 0)
-		sovra_sovra_sovra_diag = tf.concat((tf.concat((tf.zeros((Ncommunities-1, 1)), sovra_sovra_diag[:-1,:-1]), axis = 1), tf.zeros((1, Ncommunities))), axis = 0)
-		B = tf.experimental.numpy.triu(B + tf.math.exp(-10*beta)*sovra_diag + tf.math.exp(-20*beta)*sovra_sovra_diag + tf.math.exp(-30*beta)*sovra_sovra_sovra_diag)
-		B = B + tf.transpose(tf.experimental.numpy.triu(B, k = 1))
+		float_centroids = tf.cast(self.centroids, dtype = tf.float32)
+		
+		d_1 = tf.math.pow(float_centroids[:,0:1] - tf.transpose(float_centroids[:,0:1]), 2)
+		d_2 = tf.math.pow(float_centroids[:,1:2] - tf.transpose(float_centroids[:,1:2]), 2)
+		d = tf.math.sqrt(d_1 + d_2)
+
+		B = tfp.distributions.Normal(loc = 0, scale = tf.math.exp(parameters["log_phi"])).prob(d)
 
 		return B
     
@@ -1005,19 +1211,23 @@ class sbm_SIS():
 			parameters: a dictionary with the parameters as keys
 			x: Floating point tensor with shape (N,2)
 		"""
-		I_c      = tf.einsum("...c,c->...c", tf.einsum("...n,nc->...c", x[...,1], self.communities), 1/tf.reduce_sum(self.communities, axis = 0))
-		prob_I_c = tf.einsum("ij,...j->...i", self.B_matrix(parameters), I_c)
-		infectious_pressure = tf.einsum("nc,...c->...n", self.communities, prob_I_c) + tf.math.exp(parameters["log_epsilon"])
+		
+		N_float = tf.cast(self.N, dtype = tf.float32)
 
-		susceptibility      = tf.einsum("nm,m->n", self.covariates, parameters["beta_l"])
-		recoverability      = tf.einsum("nm,m->n", self.covariates, parameters["beta_g"])
+		infectivity = tf.math.exp(tf.einsum("nm,m->n", self.covariates, parameters["b_I"]))
+		I_c         = tf.einsum("...n,nc->...c", infectivity*x[...,1], self.communities)
+		infectious_pressure = tf.einsum("ij,...j->...i", self.B_matrix(parameters), I_c)/N_float
+		infectious_pressure = tf.einsum("...c,nc->...n", infectious_pressure, self.communities)
 
-		K_t_n_SI = tf.einsum("...n,n->...n", infectious_pressure, 1/(1+tf.math.exp(-susceptibility)))
+		susceptibility      = tf.math.exp( parameters["log_beta"]  + tf.einsum("nm,m->n", self.covariates, parameters["b_S"]))
+		recoverability      = tf.math.exp( parameters["log_gamma"] + tf.einsum("nm,m->n", self.covariates, parameters["b_R"]))
+
+		K_t_n_SI =  1 - tf.math.exp(-tf.einsum("...n,n->...n", infectious_pressure, susceptibility) - tf.math.exp(parameters["log_epsilon"]))
 		K_t_n_SI = tf.expand_dims(K_t_n_SI, axis = -1)
 		K_t_n_S  = tf.concat((1-K_t_n_SI, K_t_n_SI), axis = -1)
 		K_t_n_S  = tf.expand_dims(K_t_n_S, axis = -2)
 
-		K_t_n_IS = tf.einsum("...n,n->...n", tf.ones(tf.shape(infectious_pressure)), 1/(1+tf.math.exp(-recoverability)))
+		K_t_n_IS = 1 - tf.math.exp(-tf.einsum("...n,n->...n", tf.ones(tf.shape(infectious_pressure)), recoverability))
 		K_t_n_IS = tf.expand_dims(K_t_n_IS, axis = -1)  
 		K_t_n_I  = tf.concat((K_t_n_IS, 1 - K_t_n_IS), axis = -1)
 		K_t_n_I  = tf.expand_dims(K_t_n_I, axis = -2)
@@ -1044,6 +1254,456 @@ class sbm_SIS():
 					prob_SS_IS*prob_testing, 
 					(1 - prob_SS_IS)*prob_testing), axis = -1)
 	
+
+class sbm_SIR():
+	"""A stochastic block model SIS 
+
+	We implement a stochastic block model where each individual has a
+	community and some individual specific covariates. This qualify as
+	an individual based model object, meaning that it has the following 
+	methods:
+		- pi_0(parameters): to compute the initial distribution
+		- K_x(parameters, x): to comupte the transition kernel
+		- G_t(parameters): to compute the emission matrix
+	"""
+
+	def __init__(self, city_covariates, communities, covariates, observed_index):
+		super().__init__()
+		"""Construct the spatial SIS
+
+		This creates some quantities that do not change
+
+		Args:
+			locations: Floating point tensor with shape (N,2)
+			covariates: Floating point tensor with shape (N,C), with C number of covariates 
+			representing which parameters are know which are not. The default assume 
+			everything is unknown.
+		"""
+
+		self.communities     = tf.one_hot(indices = tf.cast(communities[:,0], tf.int32), depth = tf.cast(tf.shape(city_covariates)[0], tf.int32), dtype = tf.float32)
+		self.city_covariates = city_covariates
+		self.covariates      = covariates
+		self.observed_index = observed_index
+
+		self.N = tf.shape(covariates)[0]
+		self.M = 3
+
+	def pi_0(self, parameters):
+		"""
+		The initial probability of being infected
+
+		Args:
+			parameters: a dictionary with the parameters as keys
+		"""
+
+		initial_infected_centroid_index = tf.reduce_all(tf.stack((self.city_covariates[:,0]<tf.reduce_max(self.city_covariates[:,0])/2, 
+						   		 self.city_covariates[:,1]>tf.reduce_max(self.city_covariates[:,1])*0.8), axis = -1), axis = -1)
+		
+		initial_infected_centroid_index = tf.cast(initial_infected_centroid_index, dtype = tf.float32)
+
+		initial_infected_index = tf.einsum("...c,nc->...n", initial_infected_centroid_index, self.communities)
+		
+		mask = tf.expand_dims(initial_infected_index, axis = -1)
+
+		prior_infection_1 = tf.stack((tf.ones(self.N), tf.zeros(self.N), tf.zeros(self.N)), axis = -1)
+		prior_infection_2 = parameters["prior_infection"]*tf.ones((self.N, self.M))
+
+		return mask*prior_infection_2 + (1-mask)*prior_infection_1
+	
+	def B_matrix(self, parameters):
+
+		float_centroids = tf.cast(self.city_covariates, dtype = tf.float32)
+		
+		d_1 = tf.math.pow(float_centroids[:,0:1] - tf.transpose(float_centroids[:,0:1]), 2)
+		d_2 = tf.math.pow(float_centroids[:,1:2] - tf.transpose(float_centroids[:,1:2]), 2)
+		d = tf.math.sqrt(d_1 + d_2)
+
+		mask = tf.linalg.diag(tf.ones(tf.shape(self.city_covariates[:,2])))
+		d    = (1-mask)*d + tf.linalg.diag(self.city_covariates[:,2]) 
+
+		B = tfp.distributions.Normal(loc = 0, scale = tf.math.exp(parameters["log_phi"])).prob(d)
+
+		return B
+    
+	def K_x(self, parameters, x):
+		"""
+		The stochastic transition matrix computing the probabilities
+		of moving across states given a population state x.
+
+		Args:
+			parameters: a dictionary with the parameters as keys
+			x: Floating point tensor with shape (N,2)
+		"""
+		
+		N_float = tf.cast(self.N, dtype = tf.float32)
+
+		infectivity = tf.math.exp(tf.einsum("nm,m->n", self.covariates, parameters["b_I"]))
+		I_c         = tf.einsum("...n,nc->...c", infectivity*x[...,1], self.communities)
+		infectious_pressure = tf.einsum("ij,...j->...i", self.B_matrix(parameters), I_c)/N_float
+		infectious_pressure = tf.einsum("...c,nc->...n", infectious_pressure, self.communities)
+
+		susceptibility      = tf.math.exp( parameters["log_beta"]  + tf.einsum("nm,m->n", self.covariates, parameters["b_S"]))
+		recoverability      = tf.math.exp( parameters["log_gamma"] + tf.einsum("nm,m->n", self.covariates, parameters["b_R"]))
+
+		K_t_n_SI =  1 - tf.math.exp(-tf.einsum("...n,n->...n", infectious_pressure, susceptibility) - tf.math.exp(parameters["log_epsilon"]))
+		K_t_n_SI = tf.expand_dims(K_t_n_SI, axis = -1)
+		K_t_n_S  = tf.concat((1-K_t_n_SI, K_t_n_SI, tf.zeros(tf.shape(K_t_n_SI))), axis = -1)
+		K_t_n_S  = tf.expand_dims(K_t_n_S, axis = -2)
+
+		K_t_n_IR = 1 - tf.math.exp(-tf.einsum("...n,n->...n", tf.ones(tf.shape(infectious_pressure)), recoverability))
+		K_t_n_IR = tf.expand_dims(K_t_n_IR, axis = -1)  
+		K_t_n_I  = tf.concat((tf.zeros(tf.shape(K_t_n_IR)), 1 - K_t_n_IR, K_t_n_IR), axis = -1)
+		K_t_n_I  = tf.expand_dims(K_t_n_I, axis = -2)
+
+		K_t_n_R  = tf.concat((tf.zeros(tf.shape(K_t_n_IR)), tf.zeros(tf.shape(K_t_n_IR)), tf.ones(tf.shape(K_t_n_IR))), axis = -1)
+		K_t_n_R  = tf.expand_dims(K_t_n_R, axis = -2)
+
+		return tf.concat((K_t_n_S, K_t_n_I, K_t_n_R), axis  = -2)
+	
+	def G_t(self, parameters):
+		"""
+		The stochastic matrix computing the reporting probabilities.
+		Each row refer to a different state, while the columns refer
+		to the reporting states, with the first one being unreported
+
+		Args:
+			parameters: a dictionary with the parameters as keys
+		"""
+
+		prob_testing = tf.linalg.diag(tf.math.sigmoid(parameters["logit_prob_testing"]))
+
+		G_common     = tf.concat((tf.expand_dims(1 - tf.math.sigmoid(parameters["logit_prob_testing"]), axis = -1), prob_testing), axis = -1)
+		G_unobserved = tf.concat((tf.expand_dims(tf.ones(tf.shape(parameters["logit_prob_testing"])), axis = -1), tf.zeros(tf.shape(prob_testing))), axis = -1)
+
+		mask = tf.expand_dims(tf.expand_dims(self.observed_index, axis = -1), axis = -1)*tf.ones((self.N, self.M, self.M+1))
+
+		return tf.expand_dims(G_common, axis = 0)*mask + tf.expand_dims(G_unobserved, axis = 0)*(1 - mask)
+
+
+# class sbm_SIS():
+# 	"""A stochastic block model SIS 
+
+# 	We implement a stochastic block model where each individual has a
+# 	community and some individual specific covariates. This qualify as
+# 	an individual based model object, meaning that it has the following 
+# 	methods:
+# 		- pi_0(parameters): to compute the initial distribution
+# 		- K_x(parameters, x): to comupte the transition kernel
+# 		- G_t(parameters): to compute the emission matrix
+# 	"""
+
+# 	def __init__(self, communities, covariates):
+# 		super().__init__()
+# 		"""Construct the spatial SIS
+
+# 		This creates some quantities that do not change
+
+# 		Args:
+# 			locations: Floating point tensor with shape (N,2)
+# 			covariates: Floating point tensor with shape (N,C), with C number of covariates 
+# 			representing which parameters are know which are not. The default assume 
+# 			everything is unknown.
+# 		"""
+
+# 		self.communities = communities
+# 		self.covariates  = covariates
+
+# 		self.N = tf.shape(covariates)[0]
+# 		self.M = 2
+
+# 	def pi_0(self, parameters):
+# 		"""
+# 		The initial probability of being infected
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 		"""
+
+# 		return parameters["prior_infection"]*tf.ones((self.N, self.M))
+	
+# 	def B_matrix(self, parameters):
+		
+# 		Ncommunities = tf.shape(self.communities)[1]
+# 		beta = tf.math.exp(parameters["log_graph"])
+
+# 		B = tf.math.exp(-beta)*tf.eye(Ncommunities)
+# 		sovra_diag       = tf.concat((tf.concat((tf.zeros((Ncommunities-1, 1)), tf.eye(Ncommunities-1)), axis = 1), tf.zeros((1, Ncommunities))), axis = 0)
+# 		sovra_sovra_diag = tf.concat((tf.concat((tf.zeros((Ncommunities-1, 1)), sovra_diag[:-1,:-1]), axis = 1), tf.zeros((1, Ncommunities))), axis = 0)
+# 		sovra_sovra_sovra_diag = tf.concat((tf.concat((tf.zeros((Ncommunities-1, 1)), sovra_sovra_diag[:-1,:-1]), axis = 1), tf.zeros((1, Ncommunities))), axis = 0)
+# 		B = tf.experimental.numpy.triu(B + tf.math.exp(-10*beta)*sovra_diag + tf.math.exp(-20*beta)*sovra_sovra_diag + tf.math.exp(-30*beta)*sovra_sovra_sovra_diag)
+# 		B = B + tf.transpose(tf.experimental.numpy.triu(B, k = 1))
+
+# 		return B
+    
+# 	def K_x(self, parameters, x):
+# 		"""
+# 		The stochastic transition matrix computing the probabilities
+# 		of moving across states given a population state x.
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 			x: Floating point tensor with shape (N,2)
+# 		"""
+# 		I_c      = tf.einsum("...c,c->...c", tf.einsum("...n,nc->...c", x[...,1], self.communities), 1/tf.reduce_sum(self.communities, axis = 0))
+# 		prob_I_c = tf.einsum("ij,...j->...i", self.B_matrix(parameters), I_c)
+# 		infectious_pressure = tf.einsum("nc,...c->...n", self.communities, prob_I_c) + tf.math.exp(parameters["log_epsilon"])
+
+# 		susceptibility      = tf.einsum("nm,m->n", self.covariates, parameters["beta_l"])
+# 		recoverability      = tf.einsum("nm,m->n", self.covariates, parameters["beta_g"])
+
+# 		K_t_n_SI = tf.einsum("...n,n->...n", infectious_pressure, 1/(1+tf.math.exp(-susceptibility)))
+# 		K_t_n_SI = tf.expand_dims(K_t_n_SI, axis = -1)
+# 		K_t_n_S  = tf.concat((1-K_t_n_SI, K_t_n_SI), axis = -1)
+# 		K_t_n_S  = tf.expand_dims(K_t_n_S, axis = -2)
+
+# 		K_t_n_IS = tf.einsum("...n,n->...n", tf.ones(tf.shape(infectious_pressure)), 1/(1+tf.math.exp(-recoverability)))
+# 		K_t_n_IS = tf.expand_dims(K_t_n_IS, axis = -1)  
+# 		K_t_n_I  = tf.concat((K_t_n_IS, 1 - K_t_n_IS), axis = -1)
+# 		K_t_n_I  = tf.expand_dims(K_t_n_I, axis = -2)
+
+# 		return tf.concat((K_t_n_S, K_t_n_I), axis  = -2)
+    
+# 	def G_t(self, parameters):
+# 		"""
+# 		The stochastic matrix computing the reporting probabilities.
+# 		Each row refer to a different state, while the columns refer
+# 		to the reporting states, with the first one being unreported
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 		"""
+
+# 		prob_testing = tf.expand_dims(tf.math.sigmoid(parameters["logit_prob_testing"]), axis =0)*tf.ones((self.N, self.M))
+# 		prob_nontesting =  1- prob_testing
+
+# 		prob_SS_IS = tf.stack((tf.math.sigmoid(parameters["logit_specificity"]), 
+# 					1 - tf.math.sigmoid(parameters["logit_sensitivity"])), axis = 1)*tf.ones((self.N, self.M))
+
+# 		return tf.stack((prob_nontesting, 
+# 					prob_SS_IS*prob_testing, 
+# 					(1 - prob_SS_IS)*prob_testing), axis = -1)
+
+class FM_SIR():
+	"""
+	"""
+
+	def __init__(self, local_autorities_covariates, communities, farms_covariates):
+		super().__init__()
+		"""
+		"""
+
+		self.communities = tf.one_hot(indices = tf.cast(communities[:,0], tf.int32), depth = tf.cast(tf.shape(local_autorities_covariates)[0], tf.int32), dtype = tf.float32)
+		self.local_autorities_covariates   = local_autorities_covariates
+		self.farms_covariates  = farms_covariates
+
+		self.N = tf.shape(farms_covariates)[0]
+		self.M = 3
+
+	def pi_0(self, parameters):
+		"""
+		"""
+
+		N_float = tf.cast(self.N, dtype = tf.float32)
+
+		infectivity = tf.math.exp(tf.einsum("nm,m->n", self.farms_covariates, parameters["b_I"]))
+		I_c         = tf.einsum("...n,nc->...c", infectivity*tf.ones(self.N, dtype = tf.float32)/N_float, self.communities)
+		infectious_pressure = tf.einsum("ij,...j->...i", self.I_matrix(parameters), I_c)/N_float
+		infectious_pressure = tf.einsum("...c,nc->...n", infectious_pressure, self.communities)
+
+		susceptibility      = tf.math.exp( parameters["log_beta"]  + tf.einsum("nm,m->n", self.farms_covariates, parameters["b_S"]))
+
+		pi_0_I =  1 - tf.math.exp(-tf.exp(parameters["log_tau"])*tf.einsum("...n,n->...n", infectious_pressure, susceptibility) - tf.math.exp(parameters["log_epsilon"]))
+
+		return tf.stack(( 1- pi_0_I, pi_0_I, tf.zeros(tf.shape(pi_0_I)) ), axis = -1)
+		
+		# return parameters["prior_infection"]*tf.ones((self.N, self.M))
+
+	def I_matrix(self, parameters):
+
+		loc_aut_d_1 = tf.math.pow(self.local_autorities_covariates[:,0:1] - tf.transpose(self.local_autorities_covariates[:,0:1]), 2)
+		loc_aut_d_2 = tf.math.pow(self.local_autorities_covariates[:,1:2] - tf.transpose(self.local_autorities_covariates[:,1:2]), 2)
+		loc_aut_d = tf.math.sqrt(loc_aut_d_1 + loc_aut_d_2)
+
+		mask = tf.linalg.diag(tf.ones(tf.shape(self.local_autorities_covariates[:,2])))
+		loc_aut_d = loc_aut_d*(1 - mask) + tf.linalg.diag(self.local_autorities_covariates[:,2])
+
+		return tfp.distributions.Normal(loc = 0, scale = tf.math.exp(parameters["log_phi"])).prob(loc_aut_d)
+	
+	def C_matrix(self, parameters):
+
+		loc_aut_d_1 = tf.math.pow(self.local_autorities_covariates[:,0:1] - tf.transpose(self.local_autorities_covariates[:,0:1]), 2)
+		loc_aut_d_2 = tf.math.pow(self.local_autorities_covariates[:,1:2] - tf.transpose(self.local_autorities_covariates[:,1:2]), 2)
+		loc_aut_d = tf.math.sqrt(loc_aut_d_1 + loc_aut_d_2)
+
+		mask = tf.linalg.diag(tf.ones(tf.shape(self.local_autorities_covariates[:,2])))
+		loc_aut_d = loc_aut_d*(1 - mask) + tf.linalg.diag(self.local_autorities_covariates[:,2])
+
+		return tfp.distributions.Normal(loc = 0, scale = tf.math.exp(parameters["log_psi"])).prob(loc_aut_d)
+    
+	def K_x(self, parameters, x):
+		"""
+		"""
+		
+		N_float = tf.cast(self.N, dtype = tf.float32)
+
+		infectivity = tf.math.exp(tf.einsum("nm,m->n", self.farms_covariates, parameters["b_I"]))
+		I_c         = tf.einsum("...n,nc->...c", infectivity*x[...,1], self.communities)
+		infectious_pressure = tf.einsum("ij,...j->...i", self.I_matrix(parameters), I_c)/N_float
+		infectious_pressure = tf.einsum("...c,nc->...n", infectious_pressure, self.communities)
+
+		susceptibility      = tf.math.exp( parameters["log_beta"]  + tf.einsum("nm,m->n", self.farms_covariates, parameters["b_S"]))
+
+		culling_pressure = tf.einsum("ij,...j->...i", self.C_matrix(parameters), I_c)/N_float
+		culling_pressure = tf.exp(parameters["log_rho"])*tf.einsum("...c,nc->...n", culling_pressure, self.communities)
+
+		prob_culling = (1 - tf.math.exp(-culling_pressure))
+
+		K_t_n_SR = prob_culling
+		K_t_n_SI = (1 - tf.math.exp(-tf.einsum("...n,n->...n", infectious_pressure, susceptibility) - tf.math.exp(parameters["log_epsilon"])))*(1 - prob_culling)
+
+		K_t_n_SI = tf.expand_dims(K_t_n_SI, axis = -1)
+		K_t_n_SR = tf.expand_dims(K_t_n_SR, axis = -1)
+		K_t_n_S  = tf.concat((1-K_t_n_SI-K_t_n_SR, K_t_n_SI, K_t_n_SR), axis = -1)
+		K_t_n_S  = tf.expand_dims(K_t_n_S, axis = -2)
+
+		K_t_n_IR = prob_culling + (1 - prob_culling)*(1 - tf.math.exp(-tf.math.exp(parameters["log_gamma"])))
+		K_t_n_IR = tf.expand_dims(K_t_n_IR, axis = -1)  
+		K_t_n_I  = tf.concat((tf.zeros(tf.shape(K_t_n_IR)), 1 - K_t_n_IR, K_t_n_IR), axis = -1)
+		K_t_n_I  = tf.expand_dims(K_t_n_I, axis = -2)
+
+		K_t_n_R  = tf.concat((tf.zeros(tf.shape(K_t_n_IR)), tf.zeros(tf.shape(K_t_n_IR)), tf.ones(tf.shape(K_t_n_IR))), axis = -1)
+		K_t_n_R  = tf.expand_dims(K_t_n_R, axis = -2)
+
+		return tf.concat((K_t_n_S, K_t_n_I, K_t_n_R), axis  = -2)
+	
+	def G_t(self, parameters):
+		"""
+		"""
+
+		prob_I_test = tf.math.sigmoid(parameters["logit_prob_I_testing"])
+
+		prob_testing = tf.concat((tf.zeros(tf.shape(prob_I_test)), prob_I_test, tf.zeros(tf.shape(prob_I_test))), axis = 0)
+
+		G_common = tf.concat((tf.expand_dims(1 - prob_testing, axis = -1), tf.linalg.diag(prob_testing)), axis = -1)
+
+		return tf.expand_dims(G_common, axis = 0)*tf.ones((self.N, self.M, self.M+1))
+
+
+# class FM_SINR():
+# 	"""
+# 	"""
+
+# 	def __init__(self, local_autorities_covariates, communities, farms_covariates):
+# 		super().__init__()
+# 		"""Construct the spatial SIS
+
+# 		This creates some quantities that do not change
+
+# 		Args:
+# 			locations: Floating point tensor with shape (N,2)
+# 			covariates: Floating point tensor with shape (N,C), with C number of covariates 
+# 			representing which parameters are know which are not. The default assume 
+# 			everything is unknown.
+# 		"""
+
+# 		self.communities = tf.one_hot(indices = tf.cast(communities[:,0], tf.int32), depth = tf.cast(tf.shape(local_autorities_covariates)[0], tf.int32), dtype = tf.float32)
+# 		self.local_autorities_covariates   = local_autorities_covariates
+# 		self.farms_covariates  = farms_covariates
+
+# 		self.N = tf.shape(farms_covariates)[0]
+# 		self.M = 4
+
+# 	def pi_0(self, parameters):
+# 		"""
+# 		The initial probability of being infected
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 		"""
+
+# 		# N_float = tf.cast(self.N, dtype = tf.float32)
+
+# 		# infectivity = tf.math.exp(tf.einsum("nm,m->n", self.farms_covariates, parameters["b_I"]))
+# 		# I_c         = tf.einsum("...n,nc->...c", infectivity*tf.ones(self.N, dtype = tf.float32)/N_float, self.communities)
+# 		# infectious_pressure = tf.einsum("ij,...j->...i", self.B_matrix(parameters), I_c)/N_float
+# 		# infectious_pressure = tf.einsum("...c,nc->...n", infectious_pressure, self.communities)
+
+# 		# susceptibility      = tf.math.exp( parameters["log_beta"]  + tf.einsum("nm,m->n", self.farms_covariates, parameters["b_S"]))
+
+# 		# pi_0_I =  1 - tf.math.exp(-tf.exp(parameters["log_tau"])*tf.einsum("...n,n->...n", infectious_pressure, susceptibility) - tf.math.exp(parameters["log_epsilon"]))
+
+# 		# return tf.stack(( 1- pi_0_I, pi_0_I, tf.zeros(tf.shape(pi_0_I)), tf.zeros(tf.shape(pi_0_I)) ), axis = -1)
+		
+# 		return parameters["prior_infection"]*tf.ones((self.N, self.M))
+	
+# 	def B_matrix(self, parameters):
+
+# 		loc_aut_d_1 = tf.math.pow(self.local_autorities_covariates[:,0:1] - tf.transpose(self.local_autorities_covariates[:,0:1]), 2)
+# 		loc_aut_d_2 = tf.math.pow(self.local_autorities_covariates[:,1:2] - tf.transpose(self.local_autorities_covariates[:,1:2]), 2)
+# 		loc_aut_d = tf.math.sqrt(loc_aut_d_1 + loc_aut_d_2)
+
+# 		across_loc_aut = tfp.distributions.Normal(loc = 0, scale = tf.math.exp(parameters["log_phi_1"])).prob(loc_aut_d)
+# 		within_loc_aut = tfp.distributions.Normal(loc = 0, scale = tf.math.exp(parameters["log_phi_2"])).prob(self.local_autorities_covariates[:,2])
+
+# 		mask = tf.linalg.diag(tf.ones(tf.shape(self.local_autorities_covariates[:,2])))
+
+# 		return across_loc_aut*(1 - mask) + tf.linalg.diag(within_loc_aut)
+    
+# 	def K_x(self, parameters, x):
+# 		"""
+# 		The stochastic transition matrix computing the probabilities
+# 		of moving across states given a population state x.
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 			x: Floating point tensor with shape (N,2)
+# 		"""
+		
+# 		N_float = tf.cast(self.N, dtype = tf.float32)
+
+# 		chi_covariates = tf.math.pow(self.farms_covariates, tf.math.exp( parameters["log_chi"]))
+
+# 		infectivity = tf.math.exp(parameters["log_zeta"])*chi_covariates[:,0] + chi_covariates[:,1]
+# 		I_c         = tf.einsum("...n,nc->...c", infectivity*x[...,1], self.communities)
+# 		infectious_pressure = tf.einsum("ij,...j->...i", self.B_matrix(parameters), I_c)/N_float
+# 		infectious_pressure = tf.einsum("...c,nc->...n", infectious_pressure, self.communities)
+
+# 		susceptibility      = tf.math.exp(parameters["log_xi"])*chi_covariates[:,0] + chi_covariates[:,1]
+
+# 		K_t_n_SI =  1 - tf.math.exp(-tf.math.exp(parameters["log_delta"])*tf.einsum("...n,n->...n", infectious_pressure, susceptibility) - tf.math.exp(parameters["log_epsilon"]))
+# 		K_t_n_SI = tf.expand_dims(K_t_n_SI, axis = -1)
+# 		K_t_n_S  = tf.concat((1-K_t_n_SI, K_t_n_SI, tf.zeros(tf.shape(K_t_n_SI)), tf.zeros(tf.shape(K_t_n_SI))), axis = -1)
+# 		K_t_n_S  = tf.expand_dims(K_t_n_S, axis = -2)
+
+# 		K_t_n_IN = 1 - tf.math.exp(-tf.math.exp(parameters["log_rho"])*tf.ones(tf.shape(infectious_pressure)))
+# 		K_t_n_IN = tf.expand_dims(K_t_n_IN, axis = -1)  
+# 		K_t_n_I  = tf.concat((tf.zeros(tf.shape(K_t_n_IN)), 1 - K_t_n_IN, K_t_n_IN, tf.zeros(tf.shape(K_t_n_IN))), axis = -1)
+# 		K_t_n_I  = tf.expand_dims(K_t_n_I, axis = -2)
+
+# 		K_t_n_N  = tf.concat((tf.zeros(tf.shape(K_t_n_IN)), tf.zeros(tf.shape(K_t_n_IN)), tf.zeros(tf.shape(K_t_n_IN)), tf.ones(tf.shape(K_t_n_IN))), axis = -1)
+# 		K_t_n_N  = tf.expand_dims(K_t_n_N, axis = -2)
+
+# 		K_t_n_R  = tf.concat((tf.zeros(tf.shape(K_t_n_IN)), tf.zeros(tf.shape(K_t_n_IN)), tf.zeros(tf.shape(K_t_n_IN)), tf.ones(tf.shape(K_t_n_IN))), axis = -1)
+# 		K_t_n_R  = tf.expand_dims(K_t_n_R, axis = -2)
+
+# 		return tf.concat((K_t_n_S, K_t_n_I, K_t_n_N, K_t_n_R), axis  = -2)
+	
+# 	def G_t(self, parameters):
+# 		"""
+# 		The stochastic matrix computing the reporting probabilities.
+# 		Each row refer to a different state, while the columns refer
+# 		to the reporting states, with the first one being unreported
+
+# 		Args:
+# 			parameters: a dictionary with the parameters as keys
+# 		"""
+
+# 		prob_testing = tf.linalg.diag(tf.math.sigmoid(parameters["logit_prob_testing"]))
+
+# 		G_common = tf.concat((tf.expand_dims(1 - tf.math.sigmoid(parameters["logit_prob_testing"]), axis = -1), prob_testing), axis = -1)
+
+# 		return tf.expand_dims(G_common, axis = 0)*tf.ones((self.N, self.M, self.M+1))
+
 
 class sbm_SIS_finite():
 	"""A stochastic block model SIS 
@@ -1223,57 +1883,77 @@ class network_SIR():
 # if __name__ == "__main__":
 # 	import time
 
+
+# 	N = 30000
+
+# 	local_autorities_covariates  = tf.convert_to_tensor(np.load("CAL/Data/FM/local_autorities_covariates.npy"), dtype = tf.float32)[:N,:]
+# 	farms_covariates = tf.convert_to_tensor(np.load("CAL/Data/FM/farms_covariates.npy"), dtype = tf.float32)[:N,:]
+
+# 	Y = tf.convert_to_tensor(np.load("CAL/Data/FM/cut_Y_FM.npy")[:,:N,:], dtype = tf.float32)
+
+# 	communities = farms_covariates[:,-1:]
+# 	farms_covariates = farms_covariates[:,:2]
+
+# 	parameters = {
+# 		"prior_infection": tf.convert_to_tensor([1-0.0001, 0.0001, 0.0], dtype = tf.float32),
+# 		"log_beta":tf.math.log(
+# 			tf.convert_to_tensor([0.5], dtype = tf.float32)),
+# 		"b_S":tf.convert_to_tensor([+0.25, 0.25], dtype = tf.float32),
+# 		"b_I":tf.convert_to_tensor([+0.25, 0.25], dtype = tf.float32),
+# 		"log_gamma_S":tf.math.log(
+# 			tf.convert_to_tensor([0.5], dtype = tf.float32)),
+# 		"log_gamma_I":tf.math.log(
+# 			tf.convert_to_tensor([0.25], dtype = tf.float32)),
+# 		"log_phi_I":tf.math.log(
+# 			tf.convert_to_tensor([20], dtype = tf.float32)),
+# 		"log_phi_R":tf.math.log(
+# 			tf.convert_to_tensor([5], dtype = tf.float32)),
+# 		"log_epsilon":tf.math.log(
+# 			tf.convert_to_tensor([0.000025], dtype = tf.float32)),
+# 		"logit_prob_testing":logit(
+# 			tf.convert_to_tensor([0.0, 0.21, 0.0], dtype = tf.float32))}
+
+# 	SIR = FM_SIR(local_autorities_covariates, communities, farms_covariates)
+
+# 	T    = 200
+# 	start = time.time()
+# 	X, Y = simulator(SIR, parameters, T)
+# 	print(time.time()-start)
+	
+# if __name__ == "__main__":
+# 	import time
+
 # 	N_pop = 1000
-# 	covariates = tf.convert_to_tensor(np.load("CAL/Data/SpatialInference/Input/covariates.npy"), dtype = tf.float32)[:N_pop,:]
-# 	locations  = tf.convert_to_tensor(np.load("CAL/Data/SpatialInference/Input/locations.npy"), dtype = tf.float32)[:N_pop,:]
+
+# 	centroids  = tf.convert_to_tensor(np.load("CAL/Data/SpatialInference/Input/centroids.npy"), dtype = tf.int32)
+# 	city_index = np.load("CAL/Data/SpatialInference/Input/city_index.npy")
+
+# 	index             = tf.convert_to_tensor(np.load("CAL/Data/SpatialInference/Input/reshuffle.npy")[:N_pop], dtype = tf.int32)
+# 	covariates_sample = tf.convert_to_tensor(np.load("CAL/Data/SpatialInference/Input/covariates.npy"), dtype = tf.float32)
+
+# 	covariates  = tf.gather(covariates_sample, index, axis = 0)
+# 	communities = tf.gather(city_index, index, axis = 0)
 
 # 	N = tf.shape(covariates)[0]
-
 # 	parameters = {"prior_infection":tf.convert_to_tensor([1-0.01, 0.01], dtype = tf.float32),
-# 		"beta_l":tf.convert_to_tensor([-1.0, +2.0], dtype = tf.float32),
-# 		"beta_g":tf.convert_to_tensor([-1.0, -1.0], dtype = tf.float32),
+# 		"log_beta":tf.convert_to_tensor([1000.0], dtype = tf.float32),
+# 		"b_S":tf.convert_to_tensor([+0.5], dtype = tf.float32),
+# 		"b_I":tf.convert_to_tensor([+1.0], dtype = tf.float32),
+# 		"log_gamma":tf.convert_to_tensor([0.1], dtype = tf.float32),
+# 		"b_R":tf.convert_to_tensor([-0.5], dtype = tf.float32),
+# 		"log_phi":tf.math.log(
+# 			tf.convert_to_tensor([2], dtype = tf.float32)),
+# 		"log_epsilon":tf.math.log(tf.convert_to_tensor([0.0001], dtype = tf.float32)),
 # 		"logit_sensitivity":logit(
 # 			tf.convert_to_tensor([0.9], dtype = tf.float32)),
 # 		"logit_specificity":logit(
 # 			tf.convert_to_tensor([0.95], dtype = tf.float32)),
 # 		"logit_prob_testing":logit(
-# 			tf.convert_to_tensor([0.1, 0.2], dtype = tf.float32)),}
+# 			tf.convert_to_tensor([0.2, 0.5], dtype = tf.float32))}
 
-# 	SIS = basic_SIS(covariates)
+# 	SIS = sbm_SIS(communities, centroids, covariates)
 
 # 	T    = 200
 # 	start = time.time()
 # 	X, Y = simulator(SIS, parameters, T)
 # 	print(time.time()-start)
-
-# if __name__ == "__main__":
-
-# 	import time
-# 	import tensorflow as tf
-# 	import tensorflow_probability as tfp
-
-# 	N = 1000
-
-# 	covariates = tf.expand_dims(tfp.distributions.Normal(loc = 0.0, scale = 1).sample(N), axis = -1)
-
-# 	SIS = logistic_SIS(covariates)
-
-# 	parameters = {"prior_infection":tf.convert_to_tensor([1-0.01, 0.01], dtype = tf.float32),
-# 		"log_beta":tf.math.log(tf.convert_to_tensor([0.2], dtype = tf.float32)),
-# 		"b_I":tf.convert_to_tensor([+0.3], dtype = tf.float32),
-# 		"b_S":tf.convert_to_tensor([-0.3], dtype = tf.float32),
-# 		"log_gamma":tf.math.log(tf.convert_to_tensor([0.1], dtype = tf.float32)),
-# 		"b_R":tf.convert_to_tensor([+0.2], dtype = tf.float32),
-# 		"logit_sensitivity":logit(
-# 			tf.convert_to_tensor([0.9], dtype = tf.float32)),
-# 		"logit_specificity":logit(
-# 			tf.convert_to_tensor([0.95], dtype = tf.float32)),
-# 		"logit_prob_testing":logit(
-# 			tf.convert_to_tensor([0.2, 0.5], dtype = tf.float32)),}
-	
-# 	T    = 200
-# 	start = time.time()
-# 	X, Y = simulator(SIS, parameters, T)
-# 	print(time.time()-start)
-
-# 	X, Y = X[:,0,...], Y[:,0,...]
