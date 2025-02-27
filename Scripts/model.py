@@ -740,8 +740,8 @@ class spatial_SIR():
 			parameters: a dictionary with the parameters as keys
 		"""
 
-		initial_infected_index = tf.reduce_all(tf.stack((self.locations[:,0]<tf.reduce_max(self.locations[:,0])/2, 
-						   		 self.locations[:,1]>tf.reduce_max(self.locations[:,1])*0.8), axis = -1), axis = -1)
+		initial_infected_index = tf.reduce_all(tf.stack((self.locations[:,0]<5, 
+						   		 self.locations[:,1]>8), axis = -1), axis = -1)
 		
 		mask = tf.expand_dims(tf.cast(initial_infected_index, dtype = tf.float32), axis = -1)
 
