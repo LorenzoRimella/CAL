@@ -3,7 +3,37 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-def apf(ibm, parameters, y, P=128, seed_smc = None):
+@tf.function(jit_compile=True)
+def compute_proposal(ibm, parameters, X_ptm1, y_t):
+
+	k_x_tm1 = ibm.K_x(parameters, X_ptm1)
+	g_t = ibm.G_t(parameters)
+
+	p_x_ntm1 = tf.einsum("PnK,PnKM->PnM", X_ptm1, k_x_tm1)
+	p_y_nt   = tf.einsum("nMR,nR->nM", g_t, y_t)
+
+	p_y_nt_given_x_ntm1 = tf.einsum("nM,PnM->Pn", p_y_nt, p_x_ntm1)
+
+	proposal_nt = tf.einsum("PnM,Pn->PnM", tf.einsum("nM,PnM->PnM", p_y_nt, p_x_ntm1), 1/p_y_nt_given_x_ntm1)
+
+	return proposal_nt, p_y_nt_given_x_ntm1
+
+@tf.function(jit_compile=True)
+def normalization_from_log(logw):
+
+	norm_w = tf.math.exp(logw - tf.reduce_max(logw, axis = 0, keepdims=True))
+	
+	return norm_w/tf.reduce_sum(norm_w, axis = 0, keepdims = True)
+
+@tf.function(jit_compile=True)
+def compute_log_likelihood_increment(logw_pt):
+
+	shifted_weights_p = tf.exp(logw_pt-tf.reduce_max(logw_pt, axis = 0, keepdims = True))
+
+	return tf.math.log(tf.reduce_mean(shifted_weights_p, axis =0)) + tf.reduce_max(logw_pt, axis = 0)
+
+
+def apf(ibm, parameters, y, P=256, seed_smc = None):
     
 	T = tf.shape(y)[0]
 	
@@ -13,6 +43,7 @@ def apf(ibm, parameters, y, P=128, seed_smc = None):
 
 	M = tf.shape(pi_0)[-1]
 	X_p0 = tf.one_hot(tfp.distributions.Categorical(probs = pi_0).sample(P, seed = seed_smc_run[0]), M)
+	logw_p0 = tf.zeros(P)
 
 	log_likelihood = tf.zeros(1)
 
@@ -22,37 +53,42 @@ def apf(ibm, parameters, y, P=128, seed_smc = None):
 
 	def body(input, t):
 
-		X_ptm1, log_likelihood = input
+		X_ptm1, logw_ptm1, log_likelihood = input
 
 		seed_smc_pred, seed_smc_upda = tfp.random.split_seed( seed_smc_run[t], n = 2, salt = "seed_smc_body")
 
-		k_x_tm1 = ibm.K_x(parameters, X_ptm1)
-		g_t = ibm.G_t(parameters)
+		# norm_w_ptm1 = tf.math.exp(logw_ptm1 - tf.reduce_max(logw_ptm1, axis = 0, keepdims=True))
+		barw_ptm1 = normalization_from_log(logw_ptm1) #norm_w_ptm1/tf.reduce_sum(norm_w_ptm1, axis = 0, keepdims = True)
 
-		p_X_tm1 = tf.einsum("PnK,PnKM->PnM", X_ptm1, k_x_tm1)
-		p_Y_t   = tf.einsum("nMR,nR->nM", g_t, y[t,...])
+		proposal_nt, p_y_nt_given_x_ntm1 = compute_proposal(ibm, parameters, X_ptm1, y[t,...])
 
-		weights_np = tf.einsum("nM,PnM->Pn", p_Y_t, p_X_tm1)
+		logp_Y_t_given_X_tm1 = tf.math.reduce_sum(tf.math.log(p_y_nt_given_x_ntm1), axis = 1)
+		# normp_Y_t_given_X_tm1 = tf.math.exp(logp_Y_t_given_X_tm1-tf.reduce_max(logp_Y_t_given_X_tm1, axis = 0))
+		r_t = normalization_from_log(logp_Y_t_given_X_tm1) # normp_Y_t_given_X_tm1/tf.reduce_sum(normp_Y_t_given_X_tm1, axis = 0, keepdims = True)
 
-		proposal_t = tf.einsum("PnM,Pn->PnM", tf.einsum("nM,PnM->PnM", p_Y_t, p_X_tm1), 1/weights_np)
+		indeces = tfp.distributions.Categorical(probs = r_t).sample(P, seed = seed_smc_upda)
+		res_proposal_nt = tf.gather(proposal_nt, indeces, axis = 0)
+		res_barw_ptm1  = tf.gather(barw_ptm1, indeces, axis = 0)
+		res_r_t        = tf.gather(r_t, indeces, axis = 0)
+		res_logp_Y_t_given_X_tm1 = tf.gather(logp_Y_t_given_X_tm1, indeces, axis = 0)
 
-		X_pt = tf.one_hot(tfp.distributions.Categorical(probs = proposal_t).sample(seed = seed_smc_pred), M)
+		tildelogw_ptm1 = tf.math.log(res_barw_ptm1)-tf.math.log(res_r_t)
 
-		log_weights_p = tf.reduce_sum(tf.math.log(weights_np), axis = 1)
-		
-		shifted_weights_p = tf.exp(log_weights_p-tf.reduce_max(log_weights_p, axis = 0, keepdims = True))
-		norm_weights_p = shifted_weights_p/tf.reduce_sum(shifted_weights_p, axis = 0, keepdims=True)
+		X_pt = tf.one_hot(tfp.distributions.Categorical(probs = res_proposal_nt).sample(seed = seed_smc_pred), M)
 
-		log_likelihood_increment = tf.math.log(tf.reduce_mean(shifted_weights_p, axis =0)) + tf.reduce_max(log_weights_p, axis = 0)
+		logw_pt = tildelogw_ptm1 + res_logp_Y_t_given_X_tm1
 
-		indeces = tfp.distributions.Categorical(probs = norm_weights_p).sample(P, seed = seed_smc_upda)
-		res_X_pt = tf.gather(X_pt, indeces, axis = 0)
+		# resp_x_ntm1 = tf.einsum("PnK,PnKM->PnM", tf.gather(X_ptm1, indeces, axis = 0), ibm.K_x(parameters, tf.gather(X_ptm1, indeces, axis = 0)))
+		# logw_pt_1 = tildelogw_ptm1 + tf.reduce_sum(tf.math.log(tf.einsum("PnM,PnM->Pn", tf.einsum("nM,PnM->PnM", p_y_nt, resp_x_ntm1), X_pt)), axis =1) - tf.reduce_sum(tf.math.log(tf.einsum("PnM,PnM->Pn", res_proposal_nt, X_pt)), axis =1)
+		# logw_pt_3 = tf.math.log(tf.reduce_mean(tf.math.exp(logp_Y_t_given_X_tm1-tf.reduce_max(logp_Y_t_given_X_tm1))))+tf.reduce_max(logp_Y_t_given_X_tm1)
 
-		return (res_X_pt, log_likelihood+log_likelihood_increment), t+1
+		log_likelihood_increment = compute_log_likelihood_increment(logw_pt)
 
-	output = tf.while_loop(cond, body, loop_vars = ((X_p0, log_likelihood), 0))
+		return (X_pt, logw_pt, log_likelihood+log_likelihood_increment), t+1
 
-	return output[0][1]
+	output = tf.while_loop(cond, body, loop_vars = ((X_p0, logw_p0, log_likelihood), 0))
+
+	return output[0][2]
 
 # if __name__ == "__main__":
 # 	import numpy as np
@@ -93,7 +129,12 @@ def apf(ibm, parameters, y, P=128, seed_smc = None):
 # 		"q":  tf.convert_to_tensor([0.6, 0.4], dtype = tf.float32)
 # 		}
 
+# 	tf.random.set_seed((123))
+# 	np.random.seed((123))
 
 # 	SIS = simba_SIS(covariates)
 
-# 	apf(SIS, parameters, Y_SIS)
+# 	out1 = apf(SIS, parameters, Y_SIS)
+# 	out2 = deg_apf(SIS, parameters, Y_SIS)
+
+# 	print("ciao")
