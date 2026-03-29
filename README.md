@@ -4,13 +4,13 @@ The computational cost of exact likelihood evaluation for partially observed and
 
 # Repository guidelines
 
-Figures and tutorials:
+## Figures and tutorials:
 
 - figures.ipynb reproduces all the figures in the paper except for those in Sections 5.3 and D.4; see the notebook for further details.
 - tutorial_SIR.ipynb explains how to perform a CAL optimization of an SIR agent-based model using our code and how to test it. This also replicates Sections 5.3 and D.4.
 - tutorial_HMC.ipynb explains how to run an HMC as in Section 5.1.
 
-Experiments and paper sections:
+## Experiments and paper sections:
 
 - Experiments/HMC can be used to reproduce Section 5.1, where Experiments/HMC/HMC_replicates.py is used to check the coverage.
 - Experiments/SpatialInference and Experiments/GraphInference can be used to reproduce Sections 5.2 and D.3.
@@ -19,3 +19,6 @@ Experiments and paper sections:
 - Experiments/Likelihood/table_SIS.py and Experiments/Likelihood/table_SIS_ju.py can be used to reproduce Sections 5.4 and D.6.
 - Experiments/FM is used to reproduce Sections 5.5 and D.7, specifically: FM.py performs the first optimization with 10k Adam steps and different initial conditions, FM_next.py performs the next 400k Adam steps, FM_HMC.py performs the HMC, FM_ovd.py performs the grid search, FM_ovd_rep.py performs the replicates on the shared and local authority overdispersion.
 - the end of figures.ipynb reports the benchmarking experiment.
+
+## Data and experiments output:
+The data folder follows the same organization as the Experiments folder, with subfolders Input and Output, which represent the input and output of the corresponding experiments. Note that some input and output files were too large to be included in the GitHub repository. For large files, we refer to the Zenodo folder and the .zip files.
